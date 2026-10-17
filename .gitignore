@@ -1,0 +1,11 @@
+data/
+exports/
+.runtime/
+node_modules/
+*.log
+preview/
+.env
+.env.*
+!.env.example
+skills/**/scripts/library.json
+*.previous
