@@ -5,6 +5,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { runtimeRevision } from '../lib/runtime-version.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const screenshot = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
@@ -31,6 +32,13 @@ test('本地笔记的持久化、原件、备份恢复和参考包', async t => 
   assert.ok(ready, logs);
   const call = (route, options = {}) => fetch(base + route, { ...options, headers: { 'X-Aesthetic-Notes': '1', ...options.headers } });
   let id;
+  await t.test('报告已加载的服务代码版本；浏览器拖放模块可直接加载', async () => {
+    const info = await (await call('/api/info')).json();
+    assert.equal(info.runtimeRevision, await runtimeRevision(root));
+    const module = await call('/browser-drop.js');
+    assert.equal(module.status, 200); assert.match(module.headers.get('content-type'), /text\/javascript/);
+    assert.ok((await module.text()).includes('export function snapshotDrop'));
+  });
   await t.test('拒绝跨站写入；页面无需外部依赖', async () => {
     assert.equal((await call('/api/restore', { method: 'POST', headers: { Origin: 'https://example.com' }, body: '{}' })).status, 403);
     const page = await (await call('/')).text(); assert.ok(page.includes('审美笔记')); assert.ok(!page.includes('https://'));
@@ -122,7 +130,7 @@ test('本地笔记的持久化、原件、备份恢复和参考包', async t => 
     const offlineBackup = await (await call('/api/backup')).json(); assert.equal(offlineBackup.notes.find(n => n.id === linked.id).attachments[0].unavailable, true);
   });
   await t.test('Skill 下载包完整、不含笔记，解压安装后可在其他目录读取关联库', async () => {
-    const info = await (await call('/api/skill')).json(); assert.equal(info.version, '0.3.0');
+    const info = await (await call('/api/skill')).json(); assert.equal(info.version, '0.4.0');
     const response = await call('/api/skill/download'); assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'application/zip');
     const zip = Buffer.from(await response.arrayBuffer());
     assert.ok(!zip.includes(Buffer.from('喜欢层次，不参考颜色。'))); assert.ok(!zip.includes(Buffer.from(root)));
@@ -200,5 +208,65 @@ test('本地笔记的持久化、原件、备份恢复和参考包', async t => 
     await fs.appendFile(path.join(assets, 'app.js'), '\n// changed'); await call('/api/folders/sync', { method: 'POST' });
     notes = (await (await call('/api/notes')).json()).notes; assert.equal(notes.find(n => n.id === note.id).organizationState, 'stale'); assert.equal((await fetch(preview.url)).status, 409);
     assert.equal(await fs.readFile(path.join(directory, 'index.htm'), 'utf8'), '<script src="assets/app.js"></script>');
+    const linkedForm = new FormData(); linkedForm.set('note', JSON.stringify({ id: note.id, keptAttachments: [] }));
+    assert.equal((await call('/api/notes', { method: 'POST', body: linkedForm })).status, 400);
+    assert.equal((await (await call('/api/notes')).json()).notes.find(n => n.id === note.id).attachments.length, 3);
+  });
+  await t.test('同一笔记追加和删除材料，保留文字标注并拒绝过期覆盖', async () => {
+    const initial = new FormData(); initial.set('note', JSON.stringify({ text: '原始文字', comment: '喜欢线条，不参考颜色' }));
+    initial.append('files', new File([screenshot], '图片.png'));
+    let note = (await (await call('/api/notes', { method: 'POST', body: initial })).json()).note;
+    const image = note.attachments[0];
+    const extra = new FormData(); extra.set('note', JSON.stringify({ id: note.id, expectedRevision: note.revision, keptAttachments: [image.id] }));
+    extra.append('files', new File(['<p>原始 HTML</p>'], '片段.html'));
+    note = (await (await call('/api/notes', { method: 'POST', body: extra })).json()).note;
+    assert.equal(note.attachments.length, 2); const beforeRemoval = note.revision;
+    const remove = new FormData(); remove.set('note', JSON.stringify({ id: note.id, expectedRevision: beforeRemoval, keptAttachments: note.attachments.filter(a => a.id !== image.id).map(a => a.id) }));
+    note = (await (await call('/api/notes', { method: 'POST', body: remove })).json()).note;
+    assert.equal(note.attachments.length, 1); assert.equal(note.attachments[0].type, 'text/html');
+    assert.equal(note.text, '原始文字'); assert.equal(note.comment, '喜欢线条，不参考颜色');
+    const previous = JSON.parse(await fs.readFile(path.join(dataDir, 'notes', note.id, 'note.previous.json'), 'utf8'));
+    assert.equal(previous.attachments.length, 2);
+    assert.equal((await call('/api/notes', { method: 'POST', body: remove })).status, 400);
+    const empty = new FormData(); empty.set('note', JSON.stringify({ id: note.id, expectedRevision: note.revision, keptAttachments: [] }));
+    note = (await (await call('/api/notes', { method: 'POST', body: empty })).json()).note;
+    assert.equal(note.attachments.length, 0); assert.equal(note.comment, '喜欢线条，不参考颜色');
+  });
+  await t.test('彻底删除只清理确认过的回收站记录，拒绝跨站、过期和正常笔记', async () => {
+    const make = async title => {
+      const form = new FormData(); form.set('note', JSON.stringify({ title })); form.append('files', new File([screenshot], '截图.png'));
+      return (await (await call('/api/notes', { method: 'POST', body: form })).json()).note;
+    };
+    const active = await make('保留的正常笔记'); let first = await make('待清理一'), second = await make('待清理二');
+    const trash = async note => (await (await call(`/api/notes/${note.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) })).json()).note;
+    first = await trash(first); second = await trash(second);
+    const entry = note => ({ id: note.id, revision: note.revision, updatedAt: note.updatedAt });
+    const purge = notes => call('/api/trash', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }) });
+    assert.equal((await fetch(base + '/api/trash', { method: 'DELETE', body: JSON.stringify({ notes: [entry(first)] }) })).status, 403);
+    assert.equal((await call('/api/trash', { method: 'DELETE', headers: { Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ notes: [entry(first)] }) })).status, 403);
+    assert.equal((await purge([entry(first), entry(active)])).status, 400);
+    assert.ok(await fs.stat(path.join(dataDir, 'notes', first.id)));
+    assert.equal((await purge([{ ...entry(first), revision: 'old' }])).status, 400);
+    assert.equal((await purge([{ ...entry(first), updatedAt: 'old' }])).status, 400);
+    const response = await purge([entry(first)]); assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).deleted, [first.id]);
+    await assert.rejects(fs.stat(path.join(dataDir, 'notes', first.id)), { code: 'ENOENT' });
+    assert.ok(await fs.stat(path.join(dataDir, 'notes', second.id)));
+    assert.ok(await fs.stat(path.join(dataDir, 'notes', active.id)));
+  });
+  await t.test('彻底删除文件夹引用保留源文件，后续同步不重新创建已清理组', async () => {
+    const source = path.join(scratch, 'purged-reference'), group = path.join(source, '图片组');
+    await fs.mkdir(group, { recursive: true }); await fs.writeFile(path.join(group, '原图.png'), screenshot);
+    const connection = (await (await call('/api/folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: source }) })).json()).folder;
+    let note = (await (await call('/api/notes')).json()).notes.find(n => n.linkedSource?.connectionId === connection.id);
+    note = (await (await call(`/api/notes/${note.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) })).json()).note;
+    const response = await call('/api/trash', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes: [{ id: note.id, revision: note.revision, updatedAt: note.updatedAt }] }) });
+    assert.equal(response.status, 200); assert.deepEqual(Buffer.from(await fs.readFile(path.join(group, '原图.png'))), screenshot);
+    await call('/api/folders/sync', { method: 'POST' });
+    assert.equal((await (await call('/api/notes')).json()).notes.filter(n => n.linkedSource?.connectionId === connection.id).length, 0);
+    const fresh = path.join(source, '新资料组'); await fs.mkdir(fresh); await fs.writeFile(path.join(fresh, '新增.txt'), '新材料仍会同步');
+    await call('/api/folders/sync', { method: 'POST' });
+    const remaining = (await (await call('/api/notes')).json()).notes.filter(n => n.linkedSource?.connectionId === connection.id);
+    assert.equal(remaining.length, 1); assert.ok(remaining[0].text.includes('新材料仍会同步'));
   });
 });

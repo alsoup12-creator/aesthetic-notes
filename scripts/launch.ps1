@@ -2,10 +2,21 @@
 $ErrorActionPreference = 'Stop'
 $appRoot = Split-Path -Parent $PSScriptRoot
 $appUrl = 'http://127.0.0.1:4317'
+# Compare the loaded server code, not just the unchanged product version.
+[string[]]$runtimeFiles = @('server.mjs') + @(Get-ChildItem -LiteralPath (Join-Path $appRoot 'lib') -Filter '*.mjs' -File | ForEach-Object { 'lib/' + $_.Name })
+[Array]::Sort($runtimeFiles, [StringComparer]::Ordinal)
+$manifest = New-Object System.Text.StringBuilder
+foreach ($relativeFile in $runtimeFiles) {
+    $fileHash = (Get-FileHash -LiteralPath (Join-Path $appRoot $relativeFile) -Algorithm SHA256).Hash.ToLowerInvariant()
+    [void]$manifest.Append($relativeFile).Append(':').Append($fileHash).Append("`n")
+}
+$revisionHash = [System.Security.Cryptography.SHA256]::Create()
+try { $expectedRevision = [BitConverter]::ToString($revisionHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($manifest.ToString()))).Replace('-', '').ToLowerInvariant() }
+finally { $revisionHash.Dispose() }
 function Test-NotesServer {
     try {
         $info = Invoke-RestMethod -Uri "$appUrl/api/info" -TimeoutSec 2
-        return ($info.dataPath -eq (Join-Path $appRoot 'data')) -and ($info.version -eq '0.3.0')
+        return ($info.dataPath -eq (Join-Path $appRoot 'data')) -and ($info.runtimeRevision -eq $expectedRevision)
     } catch { return $false }
 }
 if (-not (Test-NotesServer)) {

@@ -1,3 +1,11 @@
+let snapshotDrop, browserMaterial, imageFile;
+try { ({ snapshotDrop, browserMaterial, imageFile } = await import('./browser-drop.js')); }
+catch (error) {
+  const banner = document.querySelector('#load-error');
+  banner.hidden = false; banner.textContent = '工具已更新，当前服务尚未重启。请重新双击“启动审美笔记”，然后刷新此页。';
+  throw error;
+}
+
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const state = { notes: [], view: 'all', query: '', tag: '', sort: 'newest', selecting: false, selected: new Set(), editing: null, files: [], kept: [], previewUrls: [], detailId: null, materialIndex: 0, version: 0, savedVersion: 0, saving: null, dirty: false };
@@ -10,8 +18,10 @@ const size = n => n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(
 const unavailable = n => n.linkedSource && n.linkedSource.status !== 'available';
 const organizationLabel = n => ({ ready: 'Agent 已整理', stale: '有更新，待 Agent 阅读', pending: '已记录' }[n.organizationState] || '已记录');
 const uploadPath = f => f.noteRelativePath || f.webkitRelativePath || f.name;
+const officeLayout = f => /\.(pptx?|docx?|pptm|docm)$/i.test(f.name);
+const officeLayoutHint = 'PPT、Word 排版参考请先导出 PDF，或截图后导入；暂不支持直接导入原文件。';
 const mediaType = f => ({ html: 'text/html', htm: 'text/html', mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', pdf: 'application/pdf' }[f.name.split('.').pop().toLowerCase()] || f.type || 'application/octet-stream');
-let toastTimer, saveTimer, lastNotes = '', stageIndex = 0;
+let toastTimer, saveTimer, lastNotes = '', stageIndex = 0, importingDrop = false, updatingMaterials = false;
 function renderStage(notes) {
   const stage = $('#collection-stage');
   const images = notes.filter(n => !unavailable(n)).flatMap(n => n.attachments.filter(a => a.type.startsWith('image/')).map(a => ({n, a})));
@@ -65,7 +75,7 @@ function render() {
   $('#notes-grid').innerHTML = notes.map(n => {
     const image = !unavailable(n) && n.attachments.find(a => a.type.startsWith('image/'));
     const cover = image ? `<img class="card-image" src="${assetUrl(n, image)}" alt="${esc(n.title)}的原件" loading="lazy">` : unavailable(n) ? `<div class="card-file">${icon('file')}<span>原文件夹${n.linkedSource.status === 'detached' ? '已断开' : '暂不可用'}</span></div>` : n.text ? `<div class="card-original">${esc(n.text.slice(0, 300))}</div>` : n.attachments.length ? `<div class="card-file">${icon('file')}<span>原始材料 · ${n.attachments.length} 份</span></div>` : '';
-    return `<article class="note-card ${state.selected.has(n.id) ? 'selected' : ''}">${state.selecting ? `<input class="card-select" type="checkbox" data-select="${n.id}" aria-label="选择 ${esc(n.title)}" ${state.selected.has(n.id) ? 'checked' : ''}>` : ''}<button class="card-open" data-open="${n.id}" aria-label="查看 ${esc(n.title)}">${cover}<div class="card-content"><div class="card-facets">${icon(n.linkedSource ? 'product' : 'book')}<span>${n.linkedSource ? '原文件夹' : '随手记录'} · ${organizationLabel(n)}</span></div><h2 class="card-title">${esc(n.title)}</h2><p class="card-comment">${esc(n.comment || (n.organizationState === 'ready' && n.organization?.summary) || '先留住这份喜欢，感受可以慢慢写。')}</p><div class="card-meta"><span class="card-tag">${esc(n.tags.map(t => '#' + t).join(' '))}</span><span>${date(n.createdAt)}</span></div></div></button>${!state.selecting && !n.trashed ? `<button class="card-favorite ${n.favorite ? 'on' : ''}" data-favorite="${n.id}" aria-label="${n.favorite ? '取消特别喜欢' : '标为特别喜欢'}" aria-pressed="${n.favorite}">${icon('star')}</button>` : ''}</article>`;
+    return `<article class="note-card ${state.selected.has(n.id) ? 'selected' : ''}">${state.selecting ? `<input class="card-select" type="checkbox" data-select="${n.id}" aria-label="选择 ${esc(n.title)}" ${state.selected.has(n.id) ? 'checked' : ''}>` : ''}<button class="card-open" data-open="${n.id}" aria-label="查看 ${esc(n.title)}">${cover}<div class="card-content"><div class="card-facets">${icon(n.linkedSource ? 'product' : 'book')}<span>${n.linkedSource ? '文件夹引用 · 未复制原件' : '随手记录'} · ${organizationLabel(n)}</span></div>${n.linkedSource ? '<p class="card-reference-hint">请保留原目录及子文件夹中的原件。</p>' : ''}<h2 class="card-title">${esc(n.title)}</h2><p class="card-comment">${esc(n.comment || (n.organizationState === 'ready' && n.organization?.summary) || '先留住这份喜欢，感受可以慢慢写。')}</p><div class="card-meta"><span class="card-tag">${esc(n.tags.map(t => '#' + t).join(' '))}</span><span>${date(n.createdAt)}</span></div></div></button>${!state.selecting && !n.trashed ? `<button class="card-favorite ${n.favorite ? 'on' : ''}" data-favorite="${n.id}" aria-label="${n.favorite ? '取消特别喜欢' : '标为特别喜欢'}" aria-pressed="${n.favorite}">${icon('star')}</button>` : ''}</article>`;
   }).join('');
   $('#empty-state').hidden = notes.length > 0;
   const first = !active.length && state.view !== 'trash' && !state.query && !state.tag;
@@ -74,6 +84,9 @@ function render() {
   $('#empty-description').innerHTML = first ? '放一张截图，粘贴一段文字，写几句自己的感受。<br>也可以直接接入你已经整理好的文件夹。' : state.query || state.tag ? '试试其他关键词，或取消筛选。' : '收集先发生，整理交给 Agent。';
   $('#empty-add').hidden = !first; $('#paste-tip').hidden = !first;
   $('#select-mode').hidden = state.view === 'trash' || !active.length; $('#select-mode').textContent = state.selecting ? '退出选择' : '选择笔记';
+  if (!$('#empty-trash')) $('#select-mode').insertAdjacentHTML('afterend', '<button class="button subtle" id="empty-trash" type="button">清空回收站</button>');
+  $('#empty-trash').hidden = state.view !== 'trash' || !state.notes.some(note => note.trashed);
+  $('#empty-trash').onclick = () => permanentlyDelete(state.notes.filter(note => note.trashed));
   $('#selection-bar').hidden = !state.selecting; $('#selected-count').textContent = `已选择 ${state.selected.size} 条`; $('#export-selected').disabled = !state.selected.size;
 }
 function endSelection() { state.selecting = false; state.selected.clear(); render(); }
@@ -83,7 +96,7 @@ function openEditor(note = null, files = [], text = '') {
   state.editing = note; state.files = []; state.kept = note ? [...note.attachments] : []; state.version = 0; state.savedVersion = 0; state.dirty = false;
   $('#note-comment').value = note?.comment || ''; $('#material-text').value = note?.text || text;
   $('#material-text').readOnly = Boolean(note?.linkedSource); $('#upload-zone').hidden = Boolean(note?.linkedSource);
-  $('#linked-hint').hidden = !note?.linkedSource; $('#linked-hint').textContent = note?.linkedSource ? `来自 ${note.linkedSource.directory}。材料在原文件夹维护，在这里写下你的标注。` : '';
+  $('#linked-hint').hidden = !note?.linkedSource; $('#linked-hint').textContent = note?.linkedSource ? `文件夹引用 · 未复制原件。原件位置：${note.linkedSource.directory}。新增和修改会同步；删除或移动原目录、子文件夹或文件后，相应材料将无法读取。在这里可以写下标注。` : '';
   $('#save-status').textContent = note ? '已保存在本机' : '传材料，写标注，就够了。';
   $('#detail').close(); $('#editor').showModal(); renderAttachments();
   if (files.length) addFiles(files); if (text) changed(); if (note) $('#note-comment').focus(); else $('#material-text').focus();
@@ -116,6 +129,7 @@ async function flushSave() {
   if (state.version !== state.savedVersion) return flushSave();
 }
 async function closeEditor(confirmSave = false) {
+  if (importingDrop) return toast('正在收取拖入的图片，请稍等。');
   if ($('#editor-save').disabled) return;
   $('#editor-save').disabled = true; $('#editor-close').disabled = true;
   $('#editor-save').textContent = '保存中…';
@@ -133,7 +147,7 @@ function addFiles(files) {
   if (files.length + state.files.length + state.kept.length > 400) return toast('一则记录最多支持 400 份材料，可改用接入原文件夹。', true);
   if ([...state.files, ...files].reduce((sum, f) => sum + f.size, 0) > 190 * 1048576) return toast('本次材料较大，请分批导入或接入原文件夹。', true);
   for (const f of files) {
-    if (!/\.(png|jpe?g|webp|gif|avif|pdf|txt|md|html?|css|m?js|json|svg|ico|woff2?|ttf|otf|mp4|m4v|webm|mov|url|webloc)$/i.test(f.name)) { toast(`已略过暂不支持的文件：${f.name}`, true); continue; }
+    if (!/\.(png|jpe?g|webp|gif|avif|pdf|txt|md|html?|css|m?js|json|svg|ico|woff2?|ttf|otf|mp4|m4v|webm|mov|url|webloc)$/i.test(f.name)) { toast(officeLayout(f) ? `${f.name}：${officeLayoutHint}` : `已略过暂不支持的文件：${f.name}`, true); continue; }
     const video = mediaType(f).startsWith('video/');
     if (f.size > (video ? 100 : 40) * 1048576) { toast(video ? '单个录屏请控制在 100 MB 以内' : '单个文件请控制在 40 MB 以内', true); continue; }
     state.files.push(f);
@@ -147,32 +161,116 @@ function materialPreview(a, note) {
   if (a.type.startsWith('image/')) return `<img class="detail-main-image" src="${url}" alt="${esc(a.name)}">`;
   if (a.type.startsWith('video/')) return `<div class="recording-preview"><video controls preload="metadata" playsinline src="${url}" aria-label="${esc(a.name)}"></video><span>${esc(a.name)}</span><small>若浏览器无法播放此编码，可下载原件查看。</small><a href="${url}?download" download="${esc(a.name)}">下载录屏</a></div>`;
   if (a.type === 'application/pdf') return pdfPreview(a.name, url);
-  if (a.type === 'text/html') return `<div class="web-preview"><div class="web-preview-intro">${icon('product')}<strong>${esc(a.relativePath || a.name)}</strong><p>保留页面与交互，而不只是一张截图。</p>${a.file ? `<button class="primary" data-preview-note="${note.id}" data-preview-file="${a.file}">体验交互</button>` : '<span>保存后即可体验交互</span>'}<small>仅加载已收录的本地资源；登录、后台与外部服务功能请结合原站或录屏查看。</small></div></div>`;
+  if (a.type === 'text/html') return `<div class="web-preview"><div class="web-preview-intro">${icon('product')}<strong>${esc(a.relativePath || a.name)}</strong><p>${a.name.startsWith('网页片段-') ? '保留拖入的原始 HTML 片段，未收录的网页样式和资源可能缺失。' : '保留页面与交互，而不只是一张截图。'}</p>${a.file ? `<button class="primary" data-preview-note="${note.id}" data-preview-file="${a.file}">体验交互</button>` : '<span>保存后即可体验交互</span>'}<small>仅加载已收录的本地资源；登录、后台与外部服务功能请结合原站或录屏查看。</small></div></div>`;
   return `<div class="pdf-preview">${icon('file')}<strong>${esc(a.relativePath || a.name)}</strong><span>原始资源，交给 Agent 按需阅读。</span><a href="${url}" download="${esc(a.name)}">下载原件</a></div>`;
 }
 function linkPreview(links) { return `<div class="web-links">${links.map(link => `<div>${safeLink(link)}</div>`).join('')}<small>打开原网页体验；链接内容可能随原站变化。</small></div>`; }
 function renderAttachments() {
   const playing = $('#editor-preview .web-preview:has(iframe), #editor-preview .recording-preview');
-  clearPreviews();
+  const previousUrls = state.previewUrls; state.previewUrls = [];
   const all = [...state.kept.map(a => ({ ...a, url: assetUrl(state.editing, a), key: `old:${a.id}` })), ...state.files.map((f, i) => { const url = URL.createObjectURL(f); state.previewUrls.push(url); return { name: f.name, relativePath: uploadPath(f), type: mediaType(f), size: f.size, url, key: `new:${i}` }; })];
   const preview = a => {
     if (playing && a?.file && playing.dataset.previewFile === a.file && !state.files.length && state.kept.length === state.editing.attachments.length) return;
     $('#editor-preview').innerHTML = materialPreview(a, state.editing);
     if (a?.file && $('#editor-preview').firstElementChild) $('#editor-preview').firstElementChild.dataset.previewFile = a.file;
   };
-  preview(unavailable(state.editing || {}) ? null : all.find(a => a.type === 'text/html') || all.find(a => a.type.startsWith('image/') || a.type.startsWith('video/') || a.type === 'application/pdf'));
+  preview(unavailable(state.editing || {}) ? null : all.find(a => a.name.startsWith('网页图片-') && a.type.startsWith('image/')) || all.find(a => a.type === 'text/html') || all.find(a => a.type.startsWith('image/') || a.type.startsWith('video/') || a.type === 'application/pdf'));
   $('#attachment-list').innerHTML = all.map(a => `<div class="attachment-row">${icon(a.type.startsWith('image/') ? 'image' : 'file')}<span>${esc(a.name)} · ${size(a.size)}</span><button data-preview="${a.key}" type="button">查看</button>${!state.editing?.linkedSource ? `<button data-remove="${a.key}" type="button" ${state.saving ? 'disabled' : ''}>移除</button>` : ''}</div>`).join('');
   $$('[data-preview]').forEach(b => b.onclick = () => preview(all.find(a => a.key === b.dataset.preview)));
   $$('[data-remove]').forEach(b => b.onclick = () => { if (state.saving) return; const [kind, id] = b.dataset.remove.split(':'); if (kind === 'old') state.kept = state.kept.filter(a => a.id !== id); else state.files.splice(Number(id), 1); renderAttachments(); changed(true); });
+  requestAnimationFrame(() => previousUrls.forEach(url => URL.revokeObjectURL(url)));
 }
 function safeLink(source) { try { const u = new URL(source); if (['http:', 'https:'].includes(u.protocol)) return `<a class="detail-source" href="${esc(u.href)}" target="_blank" rel="noopener noreferrer">${esc(source)} ↗</a>`; } catch {} return `<span class="detail-source">${esc(source)}</span>`; }
+async function updateDetailMaterials(note, files = [], removeId = '') {
+  if (updatingMaterials) return;
+  if (note.linkedSource || note.trashed) return;
+  if (files.some(officeLayout)) return toast(officeLayoutHint, true);
+  if (files.reduce((sum, f) => sum + f.size, 0) > 190 * 1048576) return toast('本次材料较大，请分批添加。', true);
+  updatingMaterials = true;
+  const buttons = $$('#detail [data-remove-material], #detail #add-detail, #detail #edit-detail, #detail #trash-detail');
+  buttons.forEach(button => { button.disabled = true; });
+  const viewedId = note.attachments[state.materialIndex]?.id, previousIndex = state.materialIndex;
+  try {
+    const form = new FormData();
+    form.set('note', JSON.stringify({ id: note.id, expectedRevision: note.revision,
+      keptAttachments: note.attachments.filter(a => a.id !== removeId).map(a => a.id), filePaths: files.map(uploadPath) }));
+    files.forEach(file => form.append('files', file));
+    const { note: saved } = await (await api('/api/notes', { method: 'POST', body: form })).json();
+    await refresh(true);
+    if ($('#detail').open && state.detailId === note.id) {
+      const keptIndex = saved.attachments.findIndex(a => a.id === viewedId);
+      state.materialIndex = files.length ? note.attachments.length : keptIndex >= 0 ? keptIndex : Math.max(0, Math.min(previousIndex, saved.attachments.length - 1));
+      openDetail(note.id, true);
+    }
+    toast(removeId ? '已从这份笔记中删除材料。' : `已添加 ${files.length} 份材料。`);
+  } catch (error) { toast(`材料未能更新：${error.message}`, true); }
+  finally { updatingMaterials = false; buttons.forEach(button => { button.disabled = false; }); }
+}
+
+function detailMaterialControls(note) {
+  const writing = $('#detail .detail-writing');
+  if (note.linkedSource) {
+    $('.detail-date', writing).insertAdjacentHTML('afterend', `<aside class="folder-reference-notice" aria-label="文件夹引用说明"><strong>文件夹引用 · 未复制原件</strong><p>新增和修改会同步。请保留原目录及子文件夹中的原件；删除或移动后，相应材料将无法读取，笔记与标注仍保留。</p><span class="folder-reference-path">原件位置：${esc(note.linkedSource.directory)}</span></aside>`);
+  }
+  let section = $$('.detail-section', writing).find(element => $('h3', element)?.textContent.startsWith('原件 ·'));
+  if (!section) {
+    section = document.createElement('section'); section.className = 'detail-section';
+    section.innerHTML = '<h3>原件 · 0 份</h3><p class="material-tip">还没有附件，可以添加图片、文件，或直接拖入材料。</p>';
+    writing.append(section);
+  }
+  if (note.linkedSource) {
+    section.insertAdjacentHTML('beforeend', '<p class="material-tip">材料随原文件夹同步，请在原目录添加或删除文件。</p>');
+  } else if (!note.trashed) {
+    section.insertAdjacentHTML('beforeend', `<p class="material-tip">PPT、Word 排版参考：建议先导出 PDF 或截图，再添加材料。</p>`);
+    $('#edit-detail').insertAdjacentHTML('beforebegin', '<button class="button" id="add-detail" type="button">添加材料</button>');
+    const picker = document.createElement('input'); picker.type = 'file'; picker.multiple = true;
+    picker.hidden = true; picker.accept = $('#file-input').accept; picker.id = 'detail-file-input'; section.append(picker);
+    $('#add-detail').onclick = () => { if (!updatingMaterials) picker.click(); };
+    picker.onchange = async () => { const files = [...picker.files]; picker.value = ''; if (files.length) await updateDetailMaterials(note, files); };
+    $$('.detail-attachment', section).forEach((row, index) => {
+      const asset = note.attachments[index], button = document.createElement('button');
+      button.type = 'button'; button.textContent = '删除'; button.dataset.removeMaterial = asset.id;
+      button.setAttribute('aria-label', `删除材料：${asset.name}`);
+      button.onclick = () => updateDetailMaterials(note, [], asset.id); row.append(button);
+    });
+  }
+  const trash = $('#trash-detail');
+  if (trash) { trash.className = 'button'; trash.innerHTML = `${icon('trash')}删除笔记`; trash.setAttribute('aria-label', '删除笔记'); }
+  if (note.trashed) {
+    $('[data-restore-note]', writing).insertAdjacentHTML('afterend', '<button class="button" id="purge-detail" type="button">彻底删除</button>');
+    $('#purge-detail').onclick = () => permanentlyDelete([note]);
+  }
+}
+let purgingTrash = false;
+async function permanentlyDelete(notes) {
+  if (purgingTrash || !notes.length) return;
+  const question = notes.length === 1 ? `彻底删除“${notes[0].title}”？` : `清空回收站中的 ${notes.length} 份笔记？`;
+  if (!confirm(`${question}\n\n笔记、标注和工具内保存的附件将被永久删除，无法撤销。引用的原文件夹及其文件不会被删除。`)) return;
+  purgingTrash = true;
+  const buttons = [$('#empty-trash'), $('#purge-detail')].filter(Boolean); buttons.forEach(button => { button.disabled = true; });
+  try {
+    const result = await (await api('/api/trash', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes: notes.map(note => ({ id: note.id, revision: note.revision, updatedAt: note.updatedAt })) }) })).json();
+    if (result.deleted.includes(state.detailId)) $('#detail').close();
+    result.deleted.forEach(id => state.selected.delete(id));
+    await refresh(true);
+    toast(result.failed.length ? `已删除 ${result.deleted.length} 份；${result.failed.length} 份暂未能删除，请重试。` : `已彻底删除 ${result.deleted.length} 份笔记。`, Boolean(result.failed.length));
+  } catch (error) { await refresh(true); toast(`未能清理：${error.message}`, true); }
+  finally { purgingTrash = false; buttons.forEach(button => { button.disabled = false; }); }
+}
 function openDetail(id, preserve = false) {
   const n = state.notes.find(n => n.id === id); if (!n) return;
-  state.detailId = id; if (!preserve) state.materialIndex = Math.max(0, n.attachments.findIndex(a => a.type === 'text/html'));
+  state.detailId = id; if (!preserve) {
+    const captured = n.attachments.findIndex(a => a.name.startsWith('网页图片-') && a.type.startsWith('image/'));
+    state.materialIndex = captured >= 0 ? captured : Math.max(0, n.attachments.findIndex(a => a.type === 'text/html'));
+  }
   const a = n.attachments[state.materialIndex];
   let material = unavailable(n) ? `<div class="material-empty">${icon('file')}<span>原文件夹暂不可用，标注仍然保留。</span></div>` : a ? materialPreview(a, n) : `${n.links?.length ? linkPreview(n.links) : ''}${n.text ? `<div class="detail-text-art">${esc(n.text)}</div>` : `<div class="material-empty">${icon('book')}<span>这一则，留下的是你的感受。</span></div>`}`;
   if (n.attachments.length > 1 && !unavailable(n)) material += `<div class="material-nav"><button data-material="-1" aria-label="上一份附件" ${state.materialIndex === 0 ? 'disabled' : ''}>‹</button><span class="material-counter">${state.materialIndex + 1} / ${n.attachments.length} · ${esc(a.name)}</span><button data-material="1" aria-label="下一份附件" ${state.materialIndex === n.attachments.length - 1 ? 'disabled' : ''}>›</button></div>`;
   $('#detail-content').innerHTML = `<div class="detail-layout"><section class="detail-material">${material}</section><section class="detail-writing"><div class="detail-actions">${n.trashed ? `<button class="button" data-restore-note="${n.id}">恢复笔记</button>` : `<button class="button" id="edit-detail">写标注</button><button class="icon-button" id="export-detail" aria-label="导出这则笔记">${icon('download')}</button><button class="icon-button" id="trash-detail" aria-label="移入回收站">${icon('trash')}</button>`}<button class="icon-button" data-close="detail" aria-label="关闭笔记">${icon('close')}</button></div><div class="card-facets">${organizationLabel(n)}</div><h2>${esc(n.title)}</h2><div class="detail-date">${date(n.createdAt)}${n.linkedSource ? ' · 来自原文件夹' : ''}</div><div>${n.tags.map(t => `<span class="detail-tag">#${esc(t)}</span>`).join('')}</div>${n.links?.length ? `<section class="detail-section"><h3>网页链接</h3>${linkPreview(n.links)}</section>` : ''}<section class="detail-section"><h3>我的标注 · 原话</h3><p class="detail-comment">${esc(n.comment || '还没有标注，感受可以慢慢写。')}</p></section>${n.text ? `<section class="detail-section"><h3>${n.linkedSource ? '原目录中的文字材料' : '原始文字'}</h3><pre>${esc(n.text)}</pre></section>` : ''}${n.linkedSource ? `<section class="detail-section"><h3>原目录 · ${n.linkedSource.status === 'available' ? '保持连接' : '暂不可用'}</h3><span class="detail-source">${esc(n.linkedSource.directory)}</span></section>` : n.source ? `<section class="detail-section"><h3>来源</h3>${safeLink(n.source)}</section>` : ''}${n.organization ? `<section class="detail-section agent-section"><h3>Agent 整理${n.organizationState === 'stale' ? ' · 原件或标注有更新，需重新阅读' : ''}</h3><p>${esc(n.organization.summary)}</p>${n.organization.observations ? `<p>${esc(n.organization.observations)}</p>` : ''}${n.organization.preferenceInterpretation ? `<h3>对偏好的理解 · AI 推测</h3><p>${esc(n.organization.preferenceInterpretation)}</p>` : ''}</section>` : `<section class="detail-section"><h3>留给 Agent</h3><p class="pending-copy">调用审美笔记 Skill 时，Agent 会阅读原件和标注，按需整理与理解。</p></section>`}${n.attachments.length ? `<section class="detail-section"><h3>原件 · ${n.attachments.length} 份</h3>${n.attachments.map((a, i) => `<div class="detail-attachment">${icon('file')}<span>${esc(a.name)}</span>${!unavailable(n) ? `<button data-material-index="${i}">查看</button><a href="${assetUrl(n, a)}?download" download>下载</a>` : ''}</div>`).join('')}</section>` : ''}</section></div>`;
+  detailMaterialControls(n);
+  const actions = $('#detail .detail-actions');
+  actions.setAttribute('role', 'toolbar'); actions.setAttribute('aria-label', '笔记操作');
+  $('#detail-content').prepend(actions);
   if (!$('#detail').open) $('#detail').showModal();
   $('#edit-detail')?.addEventListener('click', () => openEditor(n));
   $('#export-detail')?.addEventListener('click', () => { $('#detail').close(); openExport([n.id]); });
@@ -230,7 +328,7 @@ async function loadSkillInfo() {
     $('#skill-state').textContent = info.installedVersion === info.version && info.linked ? '本机 Codex 已安装，并已关联当前笔记库' : info.installedVersion === info.version ? '本机 Codex 已安装；复制使用指令即可关联当前笔记库' : info.installed ? '本机已有旧版 Skill，可下载更新' : '尚未在本机 Codex 安装，可先下载安装包';
     $('#skill-state').classList.toggle('skill-ready', info.installedVersion === info.version && info.linked);
     $('#skill-version').textContent = `审美笔记 Skill · v${info.version}`;
-    $('#ai-prompt').textContent = `请使用 $aesthetic-notes。\n笔记库位置：${info.libraryRoot}\n如果尚未关联这个笔记库，请先用 Skill 自带的 scripts/notes.mjs configure --library 命令关联上述位置。然后检查新增与修改的记录，阅读原件和我的标注，按需整理。\n本次任务：整理审美笔记。`;
+    $('#ai-prompt').textContent = `请使用 $aesthetic-notes。\n笔记库位置：${info.libraryRoot}\n如果尚未关联这个笔记库，请先用 Skill 自带的 scripts/notes.mjs configure --library 命令关联上述位置。然后检查新增与修改的记录，阅读原件和我的标注，按需整理。\n本次任务：独立整理新增和有变化的审美笔记，将整理结果保存回笔记库；无需另行提供创作任务。`;
   } catch (error) { $('#skill-state').textContent = '暂时无法确认安装状态：' + error.message; }
 }
 $('#connect-ai').onclick = async () => { $('#ai-dialog').showModal(); await loadSkillInfo(); }; $('#backup-open').onclick = () => $('#backup-dialog').showModal();
@@ -251,11 +349,14 @@ document.addEventListener('paste', e => {
   const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
   if (!typing && !$('#editor').open) { const text = e.clipboardData?.getData('text/plain'); if (text) { e.preventDefault(); openEditor(null, [], text); } }
 });
-let dragDepth = 0;
-document.addEventListener('dragenter', e => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); dragDepth++; $('#drop-overlay').hidden = false; } });
-document.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
+let dragDepth = 0, internalDrag = false;
+const acceptsDrop = transfer => !internalDrag && [...(transfer?.types || [])].some(t => ['Files', 'text/html', 'text/plain', 'text/uri-list', 'text/x-moz-url'].includes(t));
+document.addEventListener('dragstart', () => { internalDrag = true; });
+document.addEventListener('dragend', () => { internalDrag = false; dragDepth = 0; $('#drop-overlay').hidden = true; });
+document.addEventListener('dragenter', e => { if (acceptsDrop(e.dataTransfer)) { e.preventDefault(); dragDepth++; $('#drop-overlay').hidden = false; } });
+document.addEventListener('dragover', e => { if (acceptsDrop(e.dataTransfer)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
 document.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('#drop-overlay').hidden = true; });
-async function droppedFiles(items, fallback) {
+async function droppedFiles(entries, fallback) {
   const files = [];
   async function visit(entry, parent = '') {
     if (entry.name.startsWith('.') || entry.name === 'node_modules') return;
@@ -269,19 +370,47 @@ async function droppedFiles(items, fallback) {
       do { batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject)); for (const child of batch) await visit(child, relative + '/'); } while (batch.length);
     }
   }
-  const entries = items.filter(i => i.kind === 'file').map(i => i.webkitGetAsEntry?.()).filter(Boolean);
   if (!entries.length) return fallback;
   for (const entry of entries) await visit(entry);
   return files;
 }
 document.addEventListener('drop', async e => {
-  if (!e.dataTransfer?.files.length) return; e.preventDefault(); dragDepth = 0; $('#drop-overlay').hidden = true;
+  if (!acceptsDrop(e.dataTransfer)) return; e.preventDefault(); dragDepth = 0; $('#drop-overlay').hidden = true;
+  const payload = snapshotDrop(e.dataTransfer);
   if ($$('dialog[open]').some(d => !['editor', 'detail'].includes(d.id))) return;
-  try { const files = await droppedFiles([...e.dataTransfer.items], [...e.dataTransfer.files]); $('#editor').open ? addFiles(files) : openEditor(null, files); }
+  if (importingDrop) return toast('正在收取上一份材料，请稍等。');
+  if ($('#editor').open && state.editing?.linkedSource) return toast('这份材料在原文件夹维护，请关闭后拖入，另存为新笔记。');
+  importingDrop = true;
+  try {
+    const files = await droppedFiles(payload.entries, payload.files);
+    const material = browserMaterial(payload);
+    if (material.html) files.push(new File([material.html], `网页片段-${Date.now()}.html`, { type: 'text/html' }));
+    if (!files.length && !material.text && !material.images.length) return toast('没有取得可保存的材料，请试试复制粘贴或截图。', true);
+    if ($('#editor').open) {
+      if (material.text) { const field = $('#material-text'); field.value = [field.value, material.text].filter(Boolean).join('\n\n'); changed(); }
+      if (files.length) addFiles(files);
+    } else openEditor(null, files, material.text);
+    $('#editor-save').disabled = true; $('#editor-close').disabled = true;
+    $('#editor-save').textContent = '收取中…';
+    if (!payload.files.some(f => f.type.startsWith('image/')) && material.images.length) {
+      toast('正在收取网页图片…');
+      const captured = []; let failures = 0;
+      // Bound downloads to three at once, preserving the order of the source.
+      for (let i = 0; i < material.images.length; i += 3) {
+        const results = await Promise.allSettled(material.images.slice(i, i + 3).map((url, j) => imageFile(url, i + j, api)));
+        for (const result of results) { if (result.status === 'fulfilled') captured.push(result.value); else failures++; }
+      }
+      if (captured.length) addFiles(captured);
+      if ((failures && material.explicitImages) || material.omitted) toast(`已保留文字、HTML 或链接；${failures && material.explicitImages ? `${failures} 张图片未能下载，可改用截图或复制图片。` : ''}${material.omitted ? '图片较多，本次只收取前 12 张。' : ''}`, true);
+      else toast(captured.length ? '网页图片已收取，正在保存到本机。' : '已保留拖入的链接。');
+    }
+    await flushSave();
+  }
   catch (error) { toast(error.message, true); }
+  finally { importingDrop = false; $('#editor-save').disabled = false; $('#editor-close').disabled = false; $('#editor-save').textContent = '保存'; }
 });
 document.addEventListener('keydown', e => { if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || $$('dialog[open]').length || e.ctrlKey || e.metaKey || e.altKey) return; if (e.key === '/') { e.preventDefault(); $('#search').focus(); } if (e.key.toLowerCase() === 'n') openEditor(); });
-window.addEventListener('beforeunload', e => { if (state.dirty || state.saving) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', e => { if (state.dirty || state.saving || importingDrop) { e.preventDefault(); e.returnValue = ''; } });
 await refresh(true);
 setInterval(() => { if (!state.saving) refresh(); }, 5000);
 try { const info = await (await api('/api/info')).json(); $('#data-path').textContent = info.dataPath; } catch {}

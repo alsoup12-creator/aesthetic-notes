@@ -1,11 +1,11 @@
 {
   "name": "aesthetic-notes",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test tests/app.test.mjs"
+    "test": "node --test tests/*.test.mjs"
   },
   "engines": { "node": ">=22" }
 }

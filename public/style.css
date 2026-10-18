@@ -27,3 +27,21 @@ dialog{border-radius:3px}.capture-material{background:#eeeeea}.capture-annotatio
 @media(max-width:780px){.sidebar{width:66px;padding:20px 8px}.brand{margin:0 0 28px;justify-content:center}.brand>span:last-child,.sidebar .nav-item>span,.nav-label,.sidebar .new-note .shortcut,.local-status{display:none}.sidebar .new-note{font-size:0;justify-content:center;padding:12px 0}.sidebar .new-note svg{width:20px}.nav-item{justify-content:center;padding:12px 0}.small-icon{display:none}main{margin-left:66px;width:calc(100% - 66px);padding:0 18px}.topbar{height:65px}.breadcrumb{display:none}.search{width:100%}.page-heading{padding:30px 0 24px}h1{letter-spacing:-1px;font-size:28px}.stage-image{height:240px}.stage-bottom{align-items:flex-start;flex-direction:column;gap:18px}.stage-bottom h2{font-size:17px}.stage-controls{align-self:flex-end}.stage-label{font-size:9px}.notes-grid{gap:22px;grid-template-columns:1fr}.card-image{height:240px}.selection-bar{left:50%;max-width:94vw;gap:8px;padding:10px}.capture-dialog>.dialog-header{padding:0 12px}.capture-status{gap:8px}.capture-status>span{display:none}.capture-status #editor-save{min-width:65px}.page-footer{gap:15px}.collection-tools{gap:10px;align-items:flex-start}.tag-filters{gap:2px}.sort-label{gap:2px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
 .annotation-heading{font-family:var(--sans)}dialog::backdrop{background:#17171766}.toast{background:#202020}.toast.toast-error{background:#815548}
+.detail-actions{flex-wrap:wrap}.detail-attachment [data-remove-material]{color:#895248}.detail-attachment button:disabled,.detail-actions button:disabled{opacity:.45;cursor:wait}
+.card-reference-hint{font-size:11px;line-height:1.7;color:#666;margin:0 0 12px}.folder-reference-notice{margin:18px 0;padding:14px 16px;background:#eeeeea;border:1px solid #d6d6d0;font-size:12px;line-height:1.8}.folder-reference-notice strong{font-weight:500;color:#333}.folder-reference-notice p{margin:7px 0}.folder-reference-path{display:block;color:#666;overflow-wrap:anywhere}#linked-hint{line-height:1.9}
+
+/* The action bar is outside the scrolling content in both note windows. */
+.detail-dialog,.capture-dialog{overflow:hidden;max-height:91vh;max-height:91dvh}
+#detail-content{display:flex;flex-direction:column;max-height:calc(91vh - 2px);max-height:calc(91dvh - 2px)}
+.detail-dialog .detail-actions{flex:none;margin:0;padding:12px 18px;background:var(--white);border-bottom:1px solid var(--line)}
+.detail-layout{flex:1 1 auto;min-height:0;max-height:none;overflow:hidden}
+.detail-writing,.detail-material{min-height:0;overflow:auto;overscroll-behavior:contain}
+.capture-dialog[open]{display:flex;flex-direction:column}
+.capture-dialog>.dialog-header{flex:none;min-height:70px}
+.capture-body{flex:1 1 auto;min-height:0;max-height:none;overscroll-behavior:contain}
+@media(max-width:780px){
+  .detail-layout{display:block;overflow:auto;overscroll-behavior:contain}
+  .detail-writing{overflow:visible}
+  .detail-material{min-height:200px;overflow:visible}
+  .detail-dialog .detail-actions{padding:10px 12px}
+}

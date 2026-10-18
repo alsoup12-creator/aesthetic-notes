@@ -21,7 +21,7 @@ foreach ($pair in $files) {
     Copy-Item -LiteralPath (Join-Path $appRoot $pair[0]) -Destination $target -Force
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText((Join-Path $destination 'skill-manifest.json'), (@{ name = 'aesthetic-notes'; version = '0.3.0' } | ConvertTo-Json), $utf8)
+[IO.File]::WriteAllText((Join-Path $destination 'skill-manifest.json'), (@{ name = 'aesthetic-notes'; version = '0.4.0' } | ConvertTo-Json), $utf8)
 $libraryConfig = Join-Path $destination 'scripts\library.json'
 if (-not (Test-Path -LiteralPath $libraryConfig)) {
     [IO.File]::WriteAllText($libraryConfig, (@{ root = $appRoot } | ConvertTo-Json), $utf8)

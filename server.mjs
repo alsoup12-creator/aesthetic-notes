@@ -3,16 +3,19 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { ROOT, DATA, loadNotes, readNote, displayNote, saveNote, changeNote, assetPath, referenceZip, backup, restore } from './lib/store.mjs';
+import { ROOT, DATA, loadNotes, readNote, displayNote, saveNote, changeNote, purgeTrash, assetPath, referenceZip, backup, restore } from './lib/store.mjs';
 import { sendFile } from './lib/files.mjs';
+import { remoteImage } from './lib/remote-image.mjs';
+import { runtimeRevision } from './lib/runtime-version.mjs';
 import { previewFor } from './lib/preview.mjs';
 import { listFolders, connectFolder, disconnectFolder, syncFolders } from './lib/folders.mjs';
 import { skillInfo, skillPackage, SKILL_VERSION } from './lib/skill-package.mjs';
 
 const port = Number(process.env.PORT || 4317);
+const loadedRevision = await runtimeRevision(ROOT);
 const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 const origins = new Set([...hosts].map(h => `http://${h}`));
-const staticFiles = new Map([['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']], ['/icon.svg', ['icon.svg', 'image/svg+xml']]]);
+const staticFiles = new Map([['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/browser-drop.js', ['browser-drop.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']], ['/icon.svg', ['icon.svg', 'image/svg+xml']]]);
 let mutations = Promise.resolve();
 function exclusive(work) { const result = mutations.then(work); mutations = result.catch(() => {}); return result; }
 function json(res, value, status = 200) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); }
@@ -40,7 +43,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cache-Control', 'no-store');
   if (!hosts.has(req.headers.host)) return json(res, { error: '仅允许本机访问' }, 403);
-  if (['POST', 'PATCH'].includes(req.method) && (req.headers['x-aesthetic-notes'] !== '1' || (req.headers.origin && !origins.has(req.headers.origin)))) return json(res, { error: '请求来源无效' }, 403);
+  if (['POST', 'PATCH', 'DELETE'].includes(req.method) && (req.headers['x-aesthetic-notes'] !== '1' || (req.headers.origin && !origins.has(req.headers.origin)))) return json(res, { error: '请求来源无效' }, 403);
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
   try {
     if (req.method === 'GET' && staticFiles.has(url.pathname)) {
@@ -49,7 +52,11 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': type + '; charset=utf-8' }); return res.end(await fs.readFile(path.join(ROOT, 'public', file)));
     }
     if (req.method === 'GET' && url.pathname === '/api/notes') { await sync(); return json(res, { notes: (await loadNotes()).map(displayNote) }); }
-    if (req.method === 'GET' && url.pathname === '/api/info') return json(res, { version: SKILL_VERSION, dataPath: DATA });
+    if (req.method === 'DELETE' && url.pathname === '/api/trash') {
+      const input = JSON.parse((await body(req)).toString());
+      return json(res, await exclusive(() => purgeTrash(input.notes)));
+    }
+    if (req.method === 'GET' && url.pathname === '/api/info') return json(res, { version: SKILL_VERSION, dataPath: DATA, runtimeRevision: loadedRevision });
     if (req.method === 'GET' && url.pathname === '/api/skill') return json(res, await skillInfo());
     if (req.method === 'GET' && url.pathname === '/api/skill/download') return download(res, await skillPackage(), 'aesthetic-notes-skill.zip', 'application/zip');
     if (req.method === 'GET' && url.pathname === '/api/folders') return json(res, { folders: await listFolders() });
@@ -75,6 +82,12 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; frame-ancestors 'none'");
       const active = ['text/html', 'image/svg+xml', 'text/javascript', 'text/css', 'application/json'].includes(a.type);
       return await sendFile(req, res, await assetPath(note, a), a.type, url.searchParams.has('download') || active ? a.name : undefined);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/import-image') {
+      const input = JSON.parse((await body(req)).toString());
+      if (typeof input.url !== 'string' || input.url.length > 16000) throw new Error('图片地址无效');
+      const image = await remoteImage(input.url);
+      res.writeHead(200, { 'Content-Type': image.type, 'Content-Length': image.bytes.length }); return res.end(image.bytes);
     }
     if (req.method === 'POST' && url.pathname === '/api/notes') {
       const buffer = await body(req);

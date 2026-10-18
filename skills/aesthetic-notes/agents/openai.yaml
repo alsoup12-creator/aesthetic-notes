@@ -1,4 +1,4 @@
 interface:
   display_name: "审美笔记"
-  short_description: "统一读取上传记录与原文件夹，由 Agent 整理、理解材料并按当前创作任务选择参考"
-  default_prompt: "使用 $aesthetic-notes，检查新增与修改的记录，阅读原件和标注，按需整理并用于当前任务。"
+  short_description: "独立整理审美笔记，理解材料与个人偏好并保存结果，也可为具体创作选择参考"
+  default_prompt: "使用 $aesthetic-notes，独立整理新增和有变化的笔记，阅读原件与标注，将分类、观察和偏好理解保存回笔记库，无需另外提供创作任务。"
