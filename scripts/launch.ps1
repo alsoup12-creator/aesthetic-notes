@@ -5,7 +5,7 @@ $appUrl = 'http://127.0.0.1:4317'
 function Test-NotesServer {
     try {
         $info = Invoke-RestMethod -Uri "$appUrl/api/info" -TimeoutSec 2
-        return ($info.dataPath -eq (Join-Path $appRoot 'data')) -and ($info.version -eq '0.2.1')
+        return ($info.dataPath -eq (Join-Path $appRoot 'data')) -and ($info.version -eq '0.3.0')
     } catch { return $false }
 }
 if (-not (Test-NotesServer)) {

@@ -3,7 +3,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { ROOT, DATA, loadNotes, readNote, displayNote, saveNote, changeNote, assetBytes, referenceZip, backup, restore } from './lib/store.mjs';
+import { ROOT, DATA, loadNotes, readNote, displayNote, saveNote, changeNote, assetPath, referenceZip, backup, restore } from './lib/store.mjs';
+import { sendFile } from './lib/files.mjs';
+import { previewFor } from './lib/preview.mjs';
 import { listFolders, connectFolder, disconnectFolder, syncFolders } from './lib/folders.mjs';
 import { skillInfo, skillPackage, SKILL_VERSION } from './lib/skill-package.mjs';
 
@@ -43,7 +45,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && staticFiles.has(url.pathname)) {
       const [file, type] = staticFiles.get(url.pathname);
-      res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; frame-src 'self' blob:; object-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'self'");
+      res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; frame-src http://127.0.0.1:*; object-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'self'");
       res.writeHead(200, { 'Content-Type': type + '; charset=utf-8' }); return res.end(await fs.readFile(path.join(ROOT, 'public', file)));
     }
     if (req.method === 'GET' && url.pathname === '/api/notes') { await sync(); return json(res, { notes: (await loadNotes()).map(displayNote) }); }
@@ -63,14 +65,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/folders/sync') return json(res, await sync(true));
     const folderMatch = url.pathname.match(/^\/api\/folders\/([\da-f-]+)$/i);
     if (req.method === 'PATCH' && folderMatch) { await exclusive(() => disconnectFolder(folderMatch[1])); return json(res, { ok: true }); }
-    const asset = url.pathname.match(/^\/assets\/([\da-f-]+)\/([\da-f-]+\.[a-z]+)$/i);
+    const preview = url.pathname.match(/^\/api\/preview\/([\da-f-]+)\/([\da-f-]+\.[a-z0-9]+)$/i);
+    if (req.method === 'POST' && preview) { await sync(true); return json(res, await previewFor(await readNote(preview[1]), preview[2])); }
+    const asset = url.pathname.match(/^\/assets\/([\da-f-]+)\/([\da-f-]+\.[a-z0-9]+)$/i);
     if (req.method === 'GET' && asset) {
       const note = await readNote(asset[1]);
       const a = note.attachments.find(a => a.file === asset[2]);
       if (!a) return json(res, { error: '附件不存在' }, 404);
-      const bytes = await assetBytes(note, a);
-      res.writeHead(200, { 'Content-Type': a.type + (a.type === 'text/plain' ? '; charset=utf-8' : ''), 'Content-Length': bytes.length, ...(url.searchParams.has('download') ? { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(a.name)}` } : {}) });
-      return res.end(bytes);
+      res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; frame-ancestors 'none'");
+      const active = ['text/html', 'image/svg+xml', 'text/javascript', 'text/css', 'application/json'].includes(a.type);
+      return await sendFile(req, res, await assetPath(note, a), a.type, url.searchParams.has('download') || active ? a.name : undefined);
     }
     if (req.method === 'POST' && url.pathname === '/api/notes') {
       const buffer = await body(req);

@@ -9,7 +9,20 @@ const date = value => new Date(value).toLocaleDateString('zh-CN').replaceAll('/'
 const size = n => n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const unavailable = n => n.linkedSource && n.linkedSource.status !== 'available';
 const organizationLabel = n => ({ ready: 'Agent 已整理', stale: '有更新，待 Agent 阅读', pending: '已记录' }[n.organizationState] || '已记录');
-let toastTimer, saveTimer, lastNotes = '';
+const uploadPath = f => f.noteRelativePath || f.webkitRelativePath || f.name;
+const mediaType = f => ({ html: 'text/html', htm: 'text/html', mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', pdf: 'application/pdf' }[f.name.split('.').pop().toLowerCase()] || f.type || 'application/octet-stream');
+let toastTimer, saveTimer, lastNotes = '', stageIndex = 0;
+function renderStage(notes) {
+  const stage = $('#collection-stage');
+  const images = notes.filter(n => !unavailable(n)).flatMap(n => n.attachments.filter(a => a.type.startsWith('image/')).map(a => ({n, a})));
+  stage.hidden = !images.length || state.view === 'trash' || state.selecting || Boolean(state.query || state.tag);
+  if (stage.hidden) return;
+  stageIndex = (stageIndex % images.length + images.length) % images.length;
+  const { n, a } = images[stageIndex];
+  stage.innerHTML = `<div class="stage-label"><span>收藏展台</span><span>你的眼光，正在成形。</span></div><button class="stage-image" data-open="${n.id}" aria-label="查看收藏：${esc(n.title)}"><img src="${assetUrl(n,a)}" alt="${esc(a.name)}"></button><div class="stage-bottom"><div><span class="stage-kicker">值得再看一眼</span><h2>${esc(n.title)}</h2><p>${esc(n.comment || '先留下，再慢慢理解。')}</p></div><div class="stage-controls"><span aria-live="polite">${String(stageIndex+1).padStart(2,'0')} / ${String(images.length).padStart(2,'0')}</span><button class="button" id="stage-prev" aria-label="上一张收藏">←</button><button class="button" id="stage-next" aria-label="下一张收藏">→</button></div></div>`;
+  $('#stage-prev').onclick = () => { stageIndex--; renderStage(notes); $('#stage-prev').focus(); };
+  $('#stage-next').onclick = () => { stageIndex++; renderStage(notes); $('#stage-next').focus(); };
+}
 function toast(message, error = false) {
   $('#toast').textContent = message; $('#toast').hidden = false; $('#toast').classList.toggle('toast-error', error);
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, error ? 6500 : 3000);
@@ -48,7 +61,7 @@ function render() {
   $('#view-description').textContent = state.view === 'trash' ? '原件和标注仍然保留，可以随时恢复。' : '传材料，写标注。其余交给 Agent。';
   const tags = [...new Set(active.flatMap(n => n.tags))].slice(0, 7); if (state.tag && !tags.includes(state.tag)) tags.push(state.tag);
   $('#tag-filters').innerHTML = `<button class="tag-filter ${!state.tag ? 'active' : ''}" data-tag="">所有标签</button>` + tags.map(t => `<button class="tag-filter ${state.tag === t ? 'active' : ''}" data-tag="${esc(t)}">${esc(t)}</button>`).join('');
-  const notes = visibleNotes(); $('#heading-count').textContent = notes.length; $('#visible-count').textContent = notes.length ? `${notes.length} 则记录` : '';
+  const notes = visibleNotes(); renderStage(notes); $('#heading-count').textContent = notes.length; $('#visible-count').textContent = notes.length ? `${notes.length} 则记录` : '';
   $('#notes-grid').innerHTML = notes.map(n => {
     const image = !unavailable(n) && n.attachments.find(a => a.type.startsWith('image/'));
     const cover = image ? `<img class="card-image" src="${assetUrl(n, image)}" alt="${esc(n.title)}的原件" loading="lazy">` : unavailable(n) ? `<div class="card-file">${icon('file')}<span>原文件夹${n.linkedSource.status === 'detached' ? '已断开' : '暂不可用'}</span></div>` : n.text ? `<div class="card-original">${esc(n.text.slice(0, 300))}</div>` : n.attachments.length ? `<div class="card-file">${icon('file')}<span>原始材料 · ${n.attachments.length} 份</span></div>` : '';
@@ -86,7 +99,7 @@ async function flushSave() {
   if (!state.editing && !state.files.length && !$('#material-text').value.trim() && !$('#note-comment').value.trim()) { state.savedVersion = state.version; state.dirty = false; $('#save-status').textContent = '传材料，写标注，就够了。'; return; }
   const version = state.version, files = [...state.files];
   const input = { ...(state.editing ? { id: state.editing.id, expectedRevision: state.editing.revision } : {}), comment: $('#note-comment').value,
-    ...(!state.editing?.linkedSource ? { text: $('#material-text').value } : {}), keptAttachments: state.kept.map(a => a.id) };
+    ...(!state.editing?.linkedSource ? { text: $('#material-text').value } : {}), keptAttachments: state.kept.map(a => a.id), filePaths: files.map(uploadPath) };
   const form = new FormData(); form.append('note', JSON.stringify(input)); files.forEach(f => form.append('files', f));
   state.saving = (async () => {
     $('#save-status').textContent = '正在保存…'; renderAttachments();
@@ -94,34 +107,60 @@ async function flushSave() {
       const { note } = await (await api('/api/notes', { method: 'POST', body: form })).json();
       if (!note.linkedSource && $('#material-text').value === input.text && note.text !== input.text) $('#material-text').value = note.text;
       state.editing = note; state.kept = note.attachments; state.files = state.files.filter(f => !files.includes(f)); state.savedVersion = version;
-      state.dirty = state.version !== version; $('#save-status').textContent = state.dirty ? '正在记下…' : '已自动保存在本机';
+      state.dirty = state.version !== version;
       await refresh();
     } catch (error) { $('#save-status').textContent = '尚未保存，点击这里重试'; toast(`保存未完成：${error.message}`, true); throw error; }
-    finally { state.saving = null; renderAttachments(); }
+    finally { state.saving = null; renderAttachments(); if (state.savedVersion === version) $('#save-status').textContent = state.dirty ? '正在记下…' : '已自动保存在本机'; }
   })();
   await state.saving;
   if (state.version !== state.savedVersion) return flushSave();
 }
-async function closeEditor() {
-  try { await flushSave(); $('#editor').close(); clearPreviews(); state.files = []; state.dirty = false; }
+async function closeEditor(confirmSave = false) {
+  if ($('#editor-save').disabled) return;
+  $('#editor-save').disabled = true; $('#editor-close').disabled = true;
+  $('#editor-save').textContent = '保存中…';
+  try {
+    await flushSave();
+    if (confirmSave && !state.editing) { toast('先放入材料或写一点标注。'); return; }
+    $('#editor').close(); clearPreviews(); state.files = []; state.dirty = false;
+    if (confirmSave) toast('已保存到本机');
+  }
   catch { $('#note-comment').focus(); }
+  finally { $('#editor-save').disabled = false; $('#editor-close').disabled = false; $('#editor-save').textContent = '保存'; }
 }
 function addFiles(files) {
   if (state.editing?.linkedSource) return toast('这份材料在原文件夹维护，可以在这里补充标注。');
+  if (files.length + state.files.length + state.kept.length > 400) return toast('一则记录最多支持 400 份材料，可改用接入原文件夹。', true);
+  if ([...state.files, ...files].reduce((sum, f) => sum + f.size, 0) > 190 * 1048576) return toast('本次材料较大，请分批导入或接入原文件夹。', true);
   for (const f of files) {
-    if (!/\.(png|jpe?g|webp|gif|avif|pdf|txt|md)$/i.test(f.name)) { toast(`暂不支持 ${f.name}，请放入图片、PDF 或文字`, true); continue; }
-    if (f.size > 40 * 1048576) { toast('单个文件请控制在 40 MB 以内', true); continue; }
-    if (state.files.length + state.kept.length >= 40) { toast('一则记录最多支持 40 个附件', true); break; }
+    if (!/\.(png|jpe?g|webp|gif|avif|pdf|txt|md|html?|css|m?js|json|svg|ico|woff2?|ttf|otf|mp4|m4v|webm|mov|url|webloc)$/i.test(f.name)) { toast(`已略过暂不支持的文件：${f.name}`, true); continue; }
+    const video = mediaType(f).startsWith('video/');
+    if (f.size > (video ? 100 : 40) * 1048576) { toast(video ? '单个录屏请控制在 100 MB 以内' : '单个文件请控制在 40 MB 以内', true); continue; }
     state.files.push(f);
   }
   renderAttachments(); changed(true);
 }
 function pdfPreview(name, url) { return `<div class="pdf-preview">${icon('file')}<strong>${esc(name)}</strong><span>保留完整 PDF 原件</span><a href="${url}" download="${esc(name)}">下载原件查看</a><small>使用本机 PDF 阅读器打开</small></div>`; }
+function materialPreview(a, note) {
+  if (!a) return '';
+  const url = a.url || assetUrl(note, a);
+  if (a.type.startsWith('image/')) return `<img class="detail-main-image" src="${url}" alt="${esc(a.name)}">`;
+  if (a.type.startsWith('video/')) return `<div class="recording-preview"><video controls preload="metadata" playsinline src="${url}" aria-label="${esc(a.name)}"></video><span>${esc(a.name)}</span><small>若浏览器无法播放此编码，可下载原件查看。</small><a href="${url}?download" download="${esc(a.name)}">下载录屏</a></div>`;
+  if (a.type === 'application/pdf') return pdfPreview(a.name, url);
+  if (a.type === 'text/html') return `<div class="web-preview"><div class="web-preview-intro">${icon('product')}<strong>${esc(a.relativePath || a.name)}</strong><p>保留页面与交互，而不只是一张截图。</p>${a.file ? `<button class="primary" data-preview-note="${note.id}" data-preview-file="${a.file}">体验交互</button>` : '<span>保存后即可体验交互</span>'}<small>仅加载已收录的本地资源；登录、后台与外部服务功能请结合原站或录屏查看。</small></div></div>`;
+  return `<div class="pdf-preview">${icon('file')}<strong>${esc(a.relativePath || a.name)}</strong><span>原始资源，交给 Agent 按需阅读。</span><a href="${url}" download="${esc(a.name)}">下载原件</a></div>`;
+}
+function linkPreview(links) { return `<div class="web-links">${links.map(link => `<div>${safeLink(link)}</div>`).join('')}<small>打开原网页体验；链接内容可能随原站变化。</small></div>`; }
 function renderAttachments() {
+  const playing = $('#editor-preview .web-preview:has(iframe), #editor-preview .recording-preview');
   clearPreviews();
-  const all = [...state.kept.map(a => ({ ...a, url: assetUrl(state.editing, a), key: `old:${a.id}` })), ...state.files.map((f, i) => { const url = URL.createObjectURL(f); state.previewUrls.push(url); return { name: f.name, type: f.type || (/\.pdf$/i.test(f.name) ? 'application/pdf' : ''), size: f.size, url, key: `new:${i}` }; })];
-  const preview = a => { $('#editor-preview').innerHTML = !a ? '' : a.type.startsWith('image/') ? `<img src="${a.url}" alt="${esc(a.name)}">` : a.type === 'application/pdf' ? pdfPreview(a.name, a.url) : ''; };
-  preview(unavailable(state.editing || {}) ? null : all.find(a => a.type.startsWith('image/') || a.type === 'application/pdf'));
+  const all = [...state.kept.map(a => ({ ...a, url: assetUrl(state.editing, a), key: `old:${a.id}` })), ...state.files.map((f, i) => { const url = URL.createObjectURL(f); state.previewUrls.push(url); return { name: f.name, relativePath: uploadPath(f), type: mediaType(f), size: f.size, url, key: `new:${i}` }; })];
+  const preview = a => {
+    if (playing && a?.file && playing.dataset.previewFile === a.file && !state.files.length && state.kept.length === state.editing.attachments.length) return;
+    $('#editor-preview').innerHTML = materialPreview(a, state.editing);
+    if (a?.file && $('#editor-preview').firstElementChild) $('#editor-preview').firstElementChild.dataset.previewFile = a.file;
+  };
+  preview(unavailable(state.editing || {}) ? null : all.find(a => a.type === 'text/html') || all.find(a => a.type.startsWith('image/') || a.type.startsWith('video/') || a.type === 'application/pdf'));
   $('#attachment-list').innerHTML = all.map(a => `<div class="attachment-row">${icon(a.type.startsWith('image/') ? 'image' : 'file')}<span>${esc(a.name)} · ${size(a.size)}</span><button data-preview="${a.key}" type="button">查看</button>${!state.editing?.linkedSource ? `<button data-remove="${a.key}" type="button" ${state.saving ? 'disabled' : ''}>移除</button>` : ''}</div>`).join('');
   $$('[data-preview]').forEach(b => b.onclick = () => preview(all.find(a => a.key === b.dataset.preview)));
   $$('[data-remove]').forEach(b => b.onclick = () => { if (state.saving) return; const [kind, id] = b.dataset.remove.split(':'); if (kind === 'old') state.kept = state.kept.filter(a => a.id !== id); else state.files.splice(Number(id), 1); renderAttachments(); changed(true); });
@@ -129,11 +168,11 @@ function renderAttachments() {
 function safeLink(source) { try { const u = new URL(source); if (['http:', 'https:'].includes(u.protocol)) return `<a class="detail-source" href="${esc(u.href)}" target="_blank" rel="noopener noreferrer">${esc(source)} ↗</a>`; } catch {} return `<span class="detail-source">${esc(source)}</span>`; }
 function openDetail(id, preserve = false) {
   const n = state.notes.find(n => n.id === id); if (!n) return;
-  state.detailId = id; if (!preserve) state.materialIndex = 0;
+  state.detailId = id; if (!preserve) state.materialIndex = Math.max(0, n.attachments.findIndex(a => a.type === 'text/html'));
   const a = n.attachments[state.materialIndex];
-  let material = unavailable(n) ? `<div class="material-empty">${icon('file')}<span>原文件夹暂不可用，标注仍然保留。</span></div>` : a?.type.startsWith('image/') ? `<img class="detail-main-image" src="${assetUrl(n, a)}" alt="${esc(a.name)}">` : a?.type === 'application/pdf' ? pdfPreview(a.name, assetUrl(n, a) + '?download') : n.text ? `<div class="detail-text-art">${esc(n.text)}</div>` : `<div class="material-empty">${icon('book')}<span>这一则，留下的是你的感受。</span></div>`;
+  let material = unavailable(n) ? `<div class="material-empty">${icon('file')}<span>原文件夹暂不可用，标注仍然保留。</span></div>` : a ? materialPreview(a, n) : `${n.links?.length ? linkPreview(n.links) : ''}${n.text ? `<div class="detail-text-art">${esc(n.text)}</div>` : `<div class="material-empty">${icon('book')}<span>这一则，留下的是你的感受。</span></div>`}`;
   if (n.attachments.length > 1 && !unavailable(n)) material += `<div class="material-nav"><button data-material="-1" aria-label="上一份附件" ${state.materialIndex === 0 ? 'disabled' : ''}>‹</button><span class="material-counter">${state.materialIndex + 1} / ${n.attachments.length} · ${esc(a.name)}</span><button data-material="1" aria-label="下一份附件" ${state.materialIndex === n.attachments.length - 1 ? 'disabled' : ''}>›</button></div>`;
-  $('#detail-content').innerHTML = `<div class="detail-layout"><section class="detail-material">${material}</section><section class="detail-writing"><div class="detail-actions">${n.trashed ? `<button class="button" data-restore-note="${n.id}">恢复笔记</button>` : `<button class="button" id="edit-detail">写标注</button><button class="icon-button" id="export-detail" aria-label="导出这则笔记">${icon('download')}</button><button class="icon-button" id="trash-detail" aria-label="移入回收站">${icon('trash')}</button>`}<button class="icon-button" data-close="detail" aria-label="关闭笔记">${icon('close')}</button></div><div class="card-facets">${organizationLabel(n)}</div><h2>${esc(n.title)}</h2><div class="detail-date">${date(n.createdAt)}${n.linkedSource ? ' · 来自原文件夹' : ''}</div><div>${n.tags.map(t => `<span class="detail-tag">#${esc(t)}</span>`).join('')}</div><section class="detail-section"><h3>我的标注 · 原话</h3><p class="detail-comment">${esc(n.comment || '还没有标注，感受可以慢慢写。')}</p></section>${n.text ? `<section class="detail-section"><h3>${n.linkedSource ? '原目录中的文字材料' : '原始文字'}</h3><pre>${esc(n.text)}</pre></section>` : ''}${n.linkedSource ? `<section class="detail-section"><h3>原目录 · ${n.linkedSource.status === 'available' ? '保持连接' : '暂不可用'}</h3><span class="detail-source">${esc(n.linkedSource.directory)}</span></section>` : n.source ? `<section class="detail-section"><h3>来源</h3>${safeLink(n.source)}</section>` : ''}${n.organization ? `<section class="detail-section agent-section"><h3>Agent 整理${n.organizationState === 'stale' ? ' · 原件或标注有更新，需重新阅读' : ''}</h3><p>${esc(n.organization.summary)}</p>${n.organization.observations ? `<p>${esc(n.organization.observations)}</p>` : ''}${n.organization.preferenceInterpretation ? `<h3>对偏好的理解 · AI 推测</h3><p>${esc(n.organization.preferenceInterpretation)}</p>` : ''}</section>` : `<section class="detail-section"><h3>留给 Agent</h3><p class="pending-copy">调用审美笔记 Skill 时，Agent 会阅读原件和标注，按需整理与理解。</p></section>`}${n.attachments.length ? `<section class="detail-section"><h3>原件 · ${n.attachments.length} 份</h3>${n.attachments.map((a, i) => `<div class="detail-attachment">${icon('file')}<span>${esc(a.name)}</span>${!unavailable(n) ? `<button data-material-index="${i}">查看</button><a href="${assetUrl(n, a)}?download" download>下载</a>` : ''}</div>`).join('')}</section>` : ''}</section></div>`;
+  $('#detail-content').innerHTML = `<div class="detail-layout"><section class="detail-material">${material}</section><section class="detail-writing"><div class="detail-actions">${n.trashed ? `<button class="button" data-restore-note="${n.id}">恢复笔记</button>` : `<button class="button" id="edit-detail">写标注</button><button class="icon-button" id="export-detail" aria-label="导出这则笔记">${icon('download')}</button><button class="icon-button" id="trash-detail" aria-label="移入回收站">${icon('trash')}</button>`}<button class="icon-button" data-close="detail" aria-label="关闭笔记">${icon('close')}</button></div><div class="card-facets">${organizationLabel(n)}</div><h2>${esc(n.title)}</h2><div class="detail-date">${date(n.createdAt)}${n.linkedSource ? ' · 来自原文件夹' : ''}</div><div>${n.tags.map(t => `<span class="detail-tag">#${esc(t)}</span>`).join('')}</div>${n.links?.length ? `<section class="detail-section"><h3>网页链接</h3>${linkPreview(n.links)}</section>` : ''}<section class="detail-section"><h3>我的标注 · 原话</h3><p class="detail-comment">${esc(n.comment || '还没有标注，感受可以慢慢写。')}</p></section>${n.text ? `<section class="detail-section"><h3>${n.linkedSource ? '原目录中的文字材料' : '原始文字'}</h3><pre>${esc(n.text)}</pre></section>` : ''}${n.linkedSource ? `<section class="detail-section"><h3>原目录 · ${n.linkedSource.status === 'available' ? '保持连接' : '暂不可用'}</h3><span class="detail-source">${esc(n.linkedSource.directory)}</span></section>` : n.source ? `<section class="detail-section"><h3>来源</h3>${safeLink(n.source)}</section>` : ''}${n.organization ? `<section class="detail-section agent-section"><h3>Agent 整理${n.organizationState === 'stale' ? ' · 原件或标注有更新，需重新阅读' : ''}</h3><p>${esc(n.organization.summary)}</p>${n.organization.observations ? `<p>${esc(n.organization.observations)}</p>` : ''}${n.organization.preferenceInterpretation ? `<h3>对偏好的理解 · AI 推测</h3><p>${esc(n.organization.preferenceInterpretation)}</p>` : ''}</section>` : `<section class="detail-section"><h3>留给 Agent</h3><p class="pending-copy">调用审美笔记 Skill 时，Agent 会阅读原件和标注，按需整理与理解。</p></section>`}${n.attachments.length ? `<section class="detail-section"><h3>原件 · ${n.attachments.length} 份</h3>${n.attachments.map((a, i) => `<div class="detail-attachment">${icon('file')}<span>${esc(a.name)}</span>${!unavailable(n) ? `<button data-material-index="${i}">查看</button><a href="${assetUrl(n, a)}?download" download>下载</a>` : ''}</div>`).join('')}</section>` : ''}</section></div>`;
   if (!$('#detail').open) $('#detail').showModal();
   $('#edit-detail')?.addEventListener('click', () => openEditor(n));
   $('#export-detail')?.addEventListener('click', () => { $('#detail').close(); openExport([n.id]); });
@@ -157,10 +196,20 @@ $('#select-mode').onclick = () => { state.selecting = !state.selecting; if (!sta
 $('#cancel-selection').onclick = endSelection; $('#select-all').onclick = () => { visibleNotes().forEach(n => state.selected.add(n.id)); render(); };
 $('#export-selected').onclick = () => openExport([...state.selected]);
 $('#note-comment').oninput = () => changed(); $('#material-text').oninput = () => changed(); $('#save-status').onclick = () => flushSave().catch(() => {});
-$('#editor-close').onclick = closeEditor; $('#editor').addEventListener('cancel', e => { e.preventDefault(); closeEditor(); });
+$('#editor-save').onclick = () => closeEditor(true);
+$('#editor-close').onclick = () => closeEditor(); $('#editor').addEventListener('cancel', e => { e.preventDefault(); closeEditor(); });
 $('#file-input').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+$('#web-folder-input').onchange = e => { addFiles([...e.target.files].filter(f => !uploadPath(f).split('/').some(p => p.startsWith('.') || ['node_modules', 'System Volume Information'].includes(p)))); e.target.value = ''; };
 document.addEventListener('click', async e => {
   try {
+    const web = e.target.closest('[data-preview-note]');
+    if (web) {
+      const container = web.closest('.web-preview'); web.disabled = true;
+      try {
+        const { url } = await (await api(`/api/preview/${web.dataset.previewNote}/${web.dataset.previewFile}`, { method: 'POST' })).json();
+        if (container.isConnected) container.innerHTML = `<div class="web-preview-toolbar"><span>网页交互预览</span><button type="button" data-preview-note="${web.dataset.previewNote}" data-preview-file="${web.dataset.previewFile}">重新开始</button></div><iframe src="${esc(url)}" sandbox="allow-scripts" title="网页交互预览" referrerpolicy="no-referrer"></iframe><small>本地页面预览 · 仅加载已收录的资源，登录和后台功能请看原站或录屏。</small>`;
+      } finally { web.disabled = false; }
+    }
     const close = e.target.closest('[data-close]'); if (close) $(`#${close.dataset.close}`).close();
     const open = e.target.closest('[data-open]'); if (open) { if (state.selecting) { const id = open.dataset.open; state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id); render(); } else openDetail(open.dataset.open); }
     const select = e.target.closest('[data-select]'); if (select) { const id = select.dataset.select; state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id); render(); }
@@ -206,7 +255,31 @@ let dragDepth = 0;
 document.addEventListener('dragenter', e => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); dragDepth++; $('#drop-overlay').hidden = false; } });
 document.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
 document.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('#drop-overlay').hidden = true; });
-document.addEventListener('drop', e => { if (!e.dataTransfer?.files.length) return; e.preventDefault(); dragDepth = 0; $('#drop-overlay').hidden = true; if ($$('dialog[open]').some(d => !['editor', 'detail'].includes(d.id))) return; const files = [...e.dataTransfer.files]; $('#editor').open ? addFiles(files) : openEditor(null, files); });
+async function droppedFiles(items, fallback) {
+  const files = [];
+  async function visit(entry, parent = '') {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') return;
+    const relative = parent + entry.name;
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      file.noteRelativePath = relative; files.push(file);
+      if (files.length > 400) throw new Error('文件夹较大，请使用“接入文件夹”，原件仍在原处。');
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader(); let batch;
+      do { batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject)); for (const child of batch) await visit(child, relative + '/'); } while (batch.length);
+    }
+  }
+  const entries = items.filter(i => i.kind === 'file').map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return fallback;
+  for (const entry of entries) await visit(entry);
+  return files;
+}
+document.addEventListener('drop', async e => {
+  if (!e.dataTransfer?.files.length) return; e.preventDefault(); dragDepth = 0; $('#drop-overlay').hidden = true;
+  if ($$('dialog[open]').some(d => !['editor', 'detail'].includes(d.id))) return;
+  try { const files = await droppedFiles([...e.dataTransfer.items], [...e.dataTransfer.files]); $('#editor').open ? addFiles(files) : openEditor(null, files); }
+  catch (error) { toast(error.message, true); }
+});
 document.addEventListener('keydown', e => { if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || $$('dialog[open]').length || e.ctrlKey || e.metaKey || e.altKey) return; if (e.key === '/') { e.preventDefault(); $('#search').focus(); } if (e.key.toLowerCase() === 'n') openEditor(); });
 window.addEventListener('beforeunload', e => { if (state.dirty || state.saving) { e.preventDefault(); e.returnValue = ''; } });
 await refresh(true);

@@ -9,3 +9,5 @@ preview/
 !.env.example
 skills/**/scripts/library.json
 *.previous
+output/
+.playwright-cli/

@@ -5,7 +5,7 @@ import os from 'node:os';
 const source = path.join(import.meta.dirname, 'aesthetic-notes');
 const home = process.env.CODEX_HOME || path.join(process.env.USERPROFILE || os.homedir(), '.codex');
 const destination = path.join(home, 'skills', 'aesthetic-notes');
-const files = ['SKILL.md', 'agents/openai.yaml', 'references/organization.md', 'scripts/notes.mjs', 'skill-manifest.json', 'runtime/lib/store.mjs', 'runtime/lib/folders.mjs', 'runtime/lib/lock.mjs', 'runtime/scripts/notes.mjs'];
+const files = ['SKILL.md', 'agents/openai.yaml', 'references/organization.md', 'scripts/notes.mjs', 'skill-manifest.json', 'runtime/lib/store.mjs', 'runtime/lib/folders.mjs', 'runtime/lib/lock.mjs', 'runtime/lib/files.mjs', 'runtime/lib/preview.mjs', 'runtime/scripts/notes.mjs'];
 try {
   for (const file of files) await fs.access(path.join(source, file));
   for (const file of files) {

@@ -122,7 +122,7 @@ test('本地笔记的持久化、原件、备份恢复和参考包', async t => 
     const offlineBackup = await (await call('/api/backup')).json(); assert.equal(offlineBackup.notes.find(n => n.id === linked.id).attachments[0].unavailable, true);
   });
   await t.test('Skill 下载包完整、不含笔记，解压安装后可在其他目录读取关联库', async () => {
-    const info = await (await call('/api/skill')).json(); assert.equal(info.version, '0.2.1');
+    const info = await (await call('/api/skill')).json(); assert.equal(info.version, '0.3.0');
     const response = await call('/api/skill/download'); assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'application/zip');
     const zip = Buffer.from(await response.arrayBuffer());
     assert.ok(!zip.includes(Buffer.from('喜欢层次，不参考颜色。'))); assert.ok(!zip.includes(Buffer.from(root)));
@@ -144,5 +144,61 @@ test('本地笔记的持久化、原件、备份恢复和参考包', async t => 
     assert.equal(note.comment, '喜欢层次，不参考颜色。'); assert.ok(note.attachments[0].absolutePath.startsWith(library));
     const before = await fs.readFile(path.join(installed, 'scripts', 'library.json'), 'utf8');
     result = install(); assert.equal(result.status, 0, result.stderr); assert.equal(await fs.readFile(path.join(installed, 'scripts', 'library.json'), 'utf8'), before);
+  });
+  let web;
+  await t.test('网页与资源保留相对路径；预览在独立只读来源，不能读取笔记接口', async () => {
+    const form = new FormData();
+    form.set('note', JSON.stringify({ text: 'https://example.com/interaction\n喜欢展开时还保留原位置。', comment: '关注操作后的反馈。', filePaths: ['网页/index.html', '网页/assets/behavior.js', '网页/assets/style.css', '网页/assets/state.json'] }));
+    for (const [name, content] of [['index.html', '<!doctype html><link rel="stylesheet" href="/assets/style.css"><button id="expand">展开</button><p id="feedback" hidden>已展开</p><script src="assets/behavior.js"></script>'], ['behavior.js', 'document.querySelector("#expand").onclick=()=>document.querySelector("#feedback").hidden=false'], ['style.css', 'button { color: green; }'], ['state.json', '{"label":"已展开"}']]) form.append('files', new File([content], name));
+    let response = await call('/api/notes', { method: 'POST', body: form }); assert.equal(response.status, 200); web = (await response.json()).note;
+    assert.deepEqual(web.links, ['https://example.com/interaction']); assert.equal(web.attachments[1].relativePath, '网页/assets/behavior.js');
+    const html = web.attachments.find(a => a.type === 'text/html');
+    response = await call(`/assets/${web.id}/${html.file}`); assert.ok(response.headers.get('content-disposition').startsWith('attachment;')); assert.ok(response.headers.get('content-security-policy').includes('sandbox;'));
+    response = await call(`/api/preview/${web.id}/${html.file}`, { method: 'POST' }); assert.equal(response.status, 200);
+    const preview = await response.json(), origin = new URL(preview.url).origin; assert.notEqual(origin, base);
+    response = await fetch(preview.url); assert.equal(response.status, 200); assert.ok((await response.text()).includes('id="expand"'));
+    const policy = response.headers.get('content-security-policy'); assert.ok(policy.includes('sandbox allow-scripts;')); assert.ok(!policy.includes('allow-same-origin')); assert.ok(policy.includes("form-action 'none'"));
+    assert.equal((await fetch(origin + '/assets/style.css')).status, 200); assert.equal((await fetch(origin + '/assets/state.json')).status, 200);
+    assert.equal((await fetch(origin + '/api/notes')).status, 404); assert.equal((await fetch(origin + '/assets/state.json', { method: 'POST' })).status, 403);
+    assert.equal((await fetch(origin + '/%2e%2e%2fnote.json')).status, 404);
+    const update = new FormData(); update.set('note', JSON.stringify({ id: web.id, comment: '更关注返回路径。' }));
+    assert.equal((await call('/api/notes', { method: 'POST', body: update })).status, 200);
+    const reopened = await (await call(`/api/preview/${web.id}/${html.file}`, { method: 'POST' })).json(); assert.equal(reopened.url, preview.url);
+    assert.equal((await fetch(preview.url)).status, 200);
+    const remove = new FormData(); remove.set('note', JSON.stringify({ id: web.id, keptAttachments: web.attachments.filter(a => a.type !== 'application/json').map(a => a.id) }));
+    const removed = await call('/api/notes', { method: 'POST', body: remove }); assert.equal(removed.status, 200); web = (await removed.json()).note;
+    assert.equal((await fetch(preview.url)).status, 409);
+  });
+  await t.test('网页参考包与备份恢复保持资源关系；拒绝越界资源路径且不产生记录', async () => {
+    const response = await call('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [web.id] }) }); assert.equal(response.status, 200);
+    const result = spawnSync('python', ['-c', 'import io,sys,json,zipfile; z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())); assert z.testzip() is None; n=json.loads(z.read("manifest.json"))["notes"][0]; root=n["id"]+"/assets/网页/"; assert "assets/behavior.js" in z.read(root+"index.html").decode(); assert "onclick" in z.read(root+"assets/behavior.js").decode(); assert root+"assets/style.css" in z.namelist()', ], { input: Buffer.from(await response.arrayBuffer()), encoding: 'utf8', windowsHide: true }); assert.equal(result.status, 0, result.stderr);
+    const payload = await (await call('/api/backup')).json(); payload.notes = payload.notes.filter(n => n.id === web.id);
+    assert.equal((await call('/api/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).status, 200);
+    const notes = (await (await call('/api/notes')).json()).notes, restored = notes.find(n => n.id !== web.id && n.text === web.text); assert.ok(restored);
+    assert.deepEqual(restored.attachments.map(a => a.relativePath), web.attachments.map(a => a.relativePath));
+    const before = notes.length, form = new FormData(); form.set('note', JSON.stringify({ filePaths: ['../escape.html'] })); form.append('files', new File(['bad'], 'escape.html'));
+    assert.equal((await call('/api/notes', { method: 'POST', body: form })).status, 400); assert.equal((await (await call('/api/notes')).json()).notes.length, before);
+  });
+  await t.test('录屏保存原始字节，支持播放进度所需的范围读取', async () => {
+    const recording = Buffer.from('0123456789abcdefghijklmnop'), form = new FormData(); form.set('note', JSON.stringify({ comment: '观察折叠与恢复。' })); form.append('files', new File([recording], '操作录屏.webm'));
+    const response = await call('/api/notes', { method: 'POST', body: form }); assert.equal(response.status, 200); const { note } = await response.json(), asset = note.attachments[0], url = `/assets/${note.id}/${asset.file}`; assert.equal(asset.type, 'video/webm');
+    let range = await call(url, { headers: { Range: 'bytes=4-9' } }); assert.equal(range.status, 206); assert.equal(range.headers.get('content-range'), `bytes 4-9/${recording.length}`); assert.equal(await range.text(), '456789');
+    range = await call(url, { headers: { Range: 'bytes=-3' } }); assert.equal(await range.text(), 'nop');
+    assert.equal((await call(url, { headers: { Range: 'bytes=100-200' } })).status, 416);
+    assert.deepEqual(Buffer.from(await (await call(url)).arrayBuffer()), recording);
+  });
+  await t.test('已有网页文件夹及资源子目录成为同一材料组，修改脚本使整理过期', async () => {
+    const directory = path.join(scratch, 'saved-website'), assets = path.join(directory, 'assets'); await fs.mkdir(assets, { recursive: true });
+    await fs.writeFile(path.join(directory, 'index.htm'), '<script src="assets/app.js"></script>'); await fs.writeFile(path.join(assets, 'app.js'), 'const label="展开";'); await fs.writeFile(path.join(assets, 'style.css'), 'body{color:green}');
+    const response = await call('/api/folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: directory }) }); assert.equal(response.status, 200); const connection = (await response.json()).folder;
+    let notes = (await (await call('/api/notes')).json()).notes.filter(n => n.linkedSource?.connectionId === connection.id); assert.equal(notes.length, 1); const note = notes[0]; assert.equal(note.attachments.length, 3); assert.ok(note.attachments.some(a => a.relativePath === 'assets/app.js'));
+    const organizationFile = path.join(scratch, 'web-organization.json'); await fs.writeFile(organizationFile, JSON.stringify({ title: '展开反馈', facets: ['产品'], tags: [], observations: '仅阅读代码，未实际操作。' }));
+    const run = args => spawnSync(process.execPath, ['scripts/notes.mjs', ...args], { cwd: root, env: { ...process.env, AESTHETIC_NOTES_DATA: dataDir }, encoding: 'utf8', windowsHide: true });
+    assert.equal(run(['organize', note.id, '--file', organizationFile, '--revision', note.revision]).status, 0);
+    const html = note.attachments.find(a => a.type === 'text/html'), preview = await (await call(`/api/preview/${note.id}/${html.file}`, { method: 'POST' })).json();
+    assert.equal((await fetch(new URL('assets/app.js', preview.url))).status, 200);
+    await fs.appendFile(path.join(assets, 'app.js'), '\n// changed'); await call('/api/folders/sync', { method: 'POST' });
+    notes = (await (await call('/api/notes')).json()).notes; assert.equal(notes.find(n => n.id === note.id).organizationState, 'stale'); assert.equal((await fetch(preview.url)).status, 409);
+    assert.equal(await fs.readFile(path.join(directory, 'index.htm'), 'utf8'), '<script src="assets/app.js"></script>');
   });
 });
